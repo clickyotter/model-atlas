@@ -13,8 +13,8 @@ const error = (message,status=400)=>output({error:message},status,'no-store');
 function output(data,status=200,cache='public, max-age=60') {
   return Response.json(data,{status,headers:{...headers,'cache-control':cache}});
 }
-function wrap(data,{asOf=null,dataStatus='fresh',sourceUrls=[],nextCursor=null}={}) {
-  return {data,meta:{asOf, dataStatus,sourceUrls,nextCursor}};
+function wrap(data,{asOf=null,dataStatus='fresh',sourceUrls=[],nextCursor=null,...extra}={}) {
+  return {data,meta:{asOf,dataStatus,sourceUrls,nextCursor,...extra}};
 }
 const plain = (text,type='text/plain; charset=utf-8',cache='public, max-age=180') =>
   new Response(text,{headers:{...headers,'content-type':type,'cache-control':cache}});
@@ -33,55 +33,71 @@ async function caseData(db) {
   return [...published.map(row=>JSON.parse(row.payload)),...cases];
 }
 
-function page(items,query,extra={}) {
-  const cursor=Math.min(5000,Math.max(0,parseInt(query.get('cursor'),10)||0));
+function pageOptions(query) {
+  const cursor=Number(query.get('cursor'));
   const limit=Math.min(60,Math.max(1,parseInt(query.get('limit'),10)||24));
-  return wrap(items.slice(cursor,cursor+limit),{...extra,nextCursor:cursor+limit<items.length?String(cursor+limit):null});
+  return {cursor:Number.isSafeInteger(cursor)&&cursor>=0?cursor:0,limit};
+}
+
+function page(items,query,extra={}) {
+  const {cursor,limit}=pageOptions(query);
+  return wrap(items.slice(cursor,cursor+limit),{...extra,total:items.length,nextCursor:cursor+limit<items.length?String(cursor+limit):null});
 }
 
 async function readAPI(path,query,db) {
-  if (path==='/api/v1/session') return null;
+  if (path==='/api/v1/retests') {
+    const {cursor,limit}=pageOptions(query);
+    const tests=db?await all(db,'SELECT * FROM retests ORDER BY tested_at DESC,id DESC LIMIT ? OFFSET ?',limit+1,cursor):[];
+    return wrap(tests.slice(0,limit),{asOf:tests[0]?.tested_at??null,dataStatus:tests.length?'fresh':'partial',
+      nextCursor:tests.length>limit?String(cursor+limit):null});
+  }
   if (path==='/api/v1/cases' || path==='/api/v1/rankings' || path==='/api/v1/skills' || path==='/api/v1/daily' ||
-    path==='/api/v1/retests' || path.startsWith('/api/v1/cases/')) {
+    path.startsWith('/api/v1/cases/')) {
     const catalog=await caseData(db);
-    const [tests,snapshots]=db?await Promise.all([
-      all(db,'SELECT * FROM retests ORDER BY tested_at DESC LIMIT 250'),
+    const detail=path.match(/^\/api\/v1\/cases\/([^/]+)(?:\/(retests))?$/);
+    if (path.startsWith('/api/v1/cases/') && !catalog.some(item=>item.id===detail?.[1])) return false;
+    if (detail?.[2]) {
+      const tests=db?await all(db,'SELECT * FROM retests WHERE case_slug=? ORDER BY tested_at DESC,id DESC LIMIT 250',detail[1]):[];
+      return wrap(tests,{asOf:tests[0]?.tested_at??null,sourceUrls:[...new Set(tests.map(test=>test.evidence))]});
+    }
+    if (path==='/api/v1/skills') {
+      return wrap(catalog.filter(item=>item.prompt).map(item=>({id:item.id,title:item.title,version:'1.0',skillsUrl:'/skills/'+item.id,source:item.source})),
+        {asOf:catalog.map(item=>item.publishedAt).sort().at(-1)??editorialAt});
+    }
+    const [reviews,snapshots]=db?await Promise.all([
+      all(db,`SELECT case_slug,AVG(score) AS average,COUNT(score) AS samples,MAX(tested_at) AS latest FROM retests
+        WHERE score IS NOT NULL AND outcome IN ('人工成功','人工失败') GROUP BY case_slug`),
       all(db,`SELECT case_slug,captured_at,source,platform,likes,comments,shares,bookmarks FROM
         (SELECT *,ROW_NUMBER() OVER(PARTITION BY case_slug ORDER BY captured_at DESC) AS rn FROM case_metrics)
         WHERE rn<=2 ORDER BY captured_at DESC`)
     ]):[[],[]];
-    const scores=new Map();
-    for (const test of tests.filter(test=>test.score!==null)) {
-      const list=scores.get(test.case_slug)??[];
-      list.push(test.score);
-      scores.set(test.case_slug,list);
-    }
+    const scores=new Map(reviews.map(review=>[review.case_slug,review]));
     const items=rankCases(catalog,snapshots).map(item=>{
-      const sample=scores.get(item.id)??[];
-      return {...item,stability:sample.length?Math.round(sample.reduce((a,b)=>a+b,0)/sample.length):null,stabilitySamples:sample.length};
+      const review=scores.get(item.id);
+      return {...item,stability:review?Math.round(review.average):null,stabilitySamples:review?.samples??0};
     });
     const asOf=items.map(item=>item.publishedAt).sort().at(-1)??editorialAt;
-    if (path==='/api/v1/skills') {
-      return wrap(items.filter(item=>item.prompt).map(item=>({id:item.id,title:item.title,version:'1.0',skillsUrl:'/skills/'+item.id,source:item.source})),{asOf});
-    }
-    if (path==='/api/v1/retests') return page(tests,query,{asOf:tests[0]?.tested_at??null,dataStatus:tests.length?'fresh':'partial'});
     if (path==='/api/v1/daily') {
       const period=query.get('period')??'day';
       const days=period==='month'?30:period==='week'?7:1;
       const cutoff=new Date(Date.now()-hours(24*days)).toISOString();
-      return wrap({period,cases:items.filter(i=>i.publishedAt>=cutoff),retests:tests.filter(i=>i.tested_at>=cutoff),
-        news:db?cluster(await newsRows(db,cutoff)).slice(0,20):[]},{asOf:new Date().toISOString(),dataStatus:db?'fresh':'partial'});
+      const [tests,news]=db?await Promise.all([
+        all(db,'SELECT * FROM retests WHERE tested_at>=? ORDER BY tested_at DESC,id DESC LIMIT 250',cutoff),newsRows(db,cutoff)
+      ]):[[],[]];
+      return wrap({period,cases:items.filter(i=>i.publishedAt>=cutoff),retests:tests,news:cluster(news).slice(0,20)},
+        {asOf:new Date().toISOString(),dataStatus:db?'fresh':'partial'});
     }
-    if (path.startsWith('/api/v1/cases/')) {
-      const [,slug,related]=path.match(/^\/api\/v1\/cases\/([^/]+)(?:\/(retests))?$/)??[];
-      const item=items.find(i=>i.id===slug);
-      if (!item) return false;
-      return wrap(related?tests.filter(i=>i.case_slug===slug):item,{asOf,sourceUrls:item.source?[item.source]:[]});
+    if (detail) {
+      const item=items.find(i=>i.id===detail[1]);
+      return wrap(item,{asOf,sourceUrls:item.source?[item.source]:[]});
     }
-    const q=(query.get('q')??'').toLowerCase().slice(0,150);
+    const q=(query.get('q')??'').trim().toLowerCase().slice(0,150);
     const category=query.get('category');
     const model=query.get('model');
     const source=query.get('source');
+    const sourceHost=query.get('sourceHost');
+    const creator=query.get('creator');
+    const ids=query.has('ids')?new Set(query.get('ids').split(',').slice(0,60)):null;
     const tag=query.get('tag');
     const period=query.get('period');
     const since=period==='7d'||period==='30d' ? new Date(Date.now()-hours(period==='7d'?168:720)).toISOString() : '';
@@ -89,16 +105,24 @@ async function readAPI(path,query,db) {
     const requestedType=query.get('type');
     const type=['heat','stability'].includes(requestedType)?requestedType:'heat';
     const sort=ranking?type:query.get('sort');
-    const rows=items.filter(i=>(!q||[i.title,i.enTitle,i.summary,i.author,i.prompt,i.model].join(' ').toLowerCase().includes(q)) &&
+    const host=item=>httpsUrl(item.source)?.hostname;
+    const rows=items.filter(i=>(!q||[i.title,i.enTitle,i.summary,i.author,i.prompt,i.enPrompt,i.model].join(' ').toLowerCase().includes(q)) &&
       (!category||i.category===category)&&(!model||i.model.toLowerCase()===model.toLowerCase())&&
-      (!source||i.source?.includes(source))&&(!tag||i.track===tag)&&i.publishedAt>=since);
+      (!source||i.source?.includes(source))&&(!sourceHost||host(i)===sourceHost)&&(!creator||i.authorId===creator)&&
+      (!ids||ids.has(i.id))&&(!tag||i.track===tag)&&i.publishedAt>=since);
     const sorted=rows.sort((a,b)=>{
       if (sort==='heat'||sort==='stability') return (b[sort]??-1)-(a[sort]??-1);
       return b.publishedAt.localeCompare(a.publishedAt);
     });
     const ranked=ranking?sorted.filter(i=>i[type]!=null):sorted;
-    const update=ranking&&type==='heat'?ranked.map(item=>item.heatEvidence?.asOf).filter(Boolean).sort().at(-1)??asOf:asOf;
-    return page(ranked,query,{asOf:update,dataStatus:ranking&&!ranked.length?'partial':'fresh'});
+    const update=ranking?ranked.map(item=>type==='heat'?item.heatEvidence?.asOf:scores.get(item.id)?.latest)
+      .filter(Boolean).sort().at(-1)??null:asOf;
+    const facets=query.get('facets')==='1'?{
+      models:[...new Set(items.map(i=>i.model))].sort(),
+      sources:[...new Set(items.map(host).filter(Boolean))].sort(),
+      tags:[...new Set(items.map(i=>i.track).filter(Boolean))].sort()
+    }:null;
+    return page(ranked,query,{asOf:update,dataStatus:ranking&&!ranked.length?'partial':'fresh',...(facets?{facets}:{})});
   }
   if (path==='/api/v1/learn/tracks') return wrap(tracks.filter(track=>!query.get('q')||[track.title,track.summary,track.articleTitle,track.tag,lessons[track.id]]
     .join(' ').toLowerCase().includes(query.get('q').toLowerCase().slice(0,150))),{asOf:editorialAt,sourceUrls:tracks.map(t=>t.source)});
@@ -307,7 +331,10 @@ export default {
     const url=new URL(request.url);
     const path=url.pathname.replace(/\/$/,'')||'/';
     try {
-      if (path in assets) {
+      if (path==='/favicon.ico'||path==='/favicon.png') {
+        return plain(Uint8Array.from(atob(assets['/favicon.png'][1]),char=>char.charCodeAt(0)),'image/png');
+      }
+      if (Object.hasOwn(assets,path)) {
         const [type,body]=assets[path];
         return plain(body,type);
       }

@@ -4,6 +4,7 @@ const webFiles=readdirSync('web').filter(name=>/\.(?:js|css)$/.test(name));
 const assets=Object.fromEntries(webFiles.map(name=>[
   '/'+name,[name.endsWith('.css')?'text/css; charset=utf-8':'text/javascript; charset=utf-8',readFileSync('web/'+name,'utf-8')]
 ]));
+assets['/favicon.png']=['image/png',readFileSync('web/favicon.png','base64')];
 const shell=readFileSync('web/index.html','utf-8');
 const lessons=Object.fromEntries(readdirSync('lessons').filter(name=>name.endsWith('.md'))
   .map(name=>[name.slice(0,-3),readFileSync('lessons/'+name,'utf-8')]));

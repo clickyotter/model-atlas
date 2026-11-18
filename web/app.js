@@ -1,8 +1,5 @@
 import {root,params,en,t,path,parts,esc,date,known,external,link,button,pill,heading,section,empty,status,select,searchbox,form,pagination,
-  announce,copy,bindCopy,get,post,api,chips,signin,loginBox,dataOf,storeGet,storeSet,refreshTop,url} from './ui.js';
-import {atlasArt,graphViz,oceanViz} from './visuals.js';
-import {renderClub,renderOffer,offerStatus} from './club.js';
-import {renderAdmin,renderSubmit} from './admin.js';
+  announce,copy,bindCopy,get,chips,dataOf,storeGet,storeSet,refreshTop,url} from './ui.js';
 
 const modules=[
   ['/cases','案例库','Cases','按场景找实操案例','Find an original example'],
@@ -19,20 +16,28 @@ document.querySelectorAll('#nav a').forEach((anchor,i)=>{
 });
 const lang=new URL(location.href);
 if(en) lang.searchParams.delete('lang'); else lang.searchParams.set('lang','en');
-document.querySelector('#locale').href=lang.pathname+lang.search;
+document.querySelector('#locale').href=lang.pathname+lang.search+lang.hash;
 document.querySelector('#locale').textContent=en?'中文':'EN';
+document.querySelector('#locale').setAttribute('aria-label',en?'切换到中文':'Switch to English');
 document.querySelector('.head-tools .search-icon').href=url('/search');
 document.querySelectorAll('.footer a').forEach(a=>a.href=url(a.getAttribute('href')));
+document.querySelector('.mast .brand').href=url('/');
 
 const title=item=>en?(item.enTitle||item.title):item.title;
 const categoryOptions=[['',t('全部','All')],['编程',t('编程','Coding')],['数据',t('数据','Data')],['影像',t('影像','Visual')],['文本',t('文本','Text')]];
 const mapType={'公司':'Company','模型':'Model','工具':'Tool','产品':'Product','开源':'Open source','概念':'Concept','人物':'Person'};
+const topicNames={coding:'AI Coding',retrieval:'RAG',agents:'MCP',multimodal:t('多模态','Multimodal')};
 const chipBtn=(label,attrs='')=>'<button class="chip" '+attrs+'>'+esc(label)+'</button>';
 const caseTabs=active=>chips([
   ['/cases',t('案例库','Catalog'),active==='cases'],['/rankings',t('排行榜','Rankings'),active==='rankings'],
-  ['/retests',t('复测','Retests'),active==='retests'],['/skills',t('Skills','Skills'),active==='skills'],['/daily',t('报告','Reports'),active==='daily']
+  ['/retests',t('复测','Retests'),active==='retests'],['/skills',t('Skills','Skills'),active==='skills'],['/daily',t('报告','Reports'),active==='daily'],
+  ['/cases?view=saved',t('我的收藏','Saved cases'),active==='saved']
 ]);
 const viewQuery=(defaults={})=>({...defaults,...Object.fromEntries([...params].filter(([key,v])=>key!=='lang' && v!==''))});
+const savedCaseIds=()=>{
+  const saved=storeGet('saved-cases',[]);
+  return Array.isArray(saved)?[...new Set(saved.filter(id=>typeof id==='string'))]:[];
+};
 const art=item=>'<div class="art '+esc(item.theme||'violet')+'" aria-hidden="true"><span class="art-label">'+esc(item.category)+
   '</span><span class="diagram"><i></i><b>'+esc(item.model)+'</b></span></div>';
 function caseCard(item) {
@@ -62,40 +67,69 @@ async function home() {
       '<div id="home-news" class="panel briefs">'+empty(t('正在读取源站数据','Loading source data'))+'</div></section></div>'+
       '<section class="section">'+section(t('专题入口','Explore the index'))+'<div class="index-links">'+modules.map(([to,zh,label,hint,enHint])=>
       '<a href="'+url(to)+'"><b>'+t(zh,label)+' ↗</b><small>'+t(hint,enHint)+'</small></a>').join('')+'</div></section>';
-  atlasArt(document.getElementById('atlas-art'));
-  const [cases,news,health,tracks,offers]=await Promise.all([
-    dataOf(get('cases',{limit:60}),[]),dataOf(get('news',{mode:'all',limit:6}),[]),dataOf(get('sources/health'),null),
+  import('./visuals.js').then(({atlasArt})=>atlasArt(document.getElementById('atlas-art'))).catch(()=>{});
+  const [catalog,news,health,tracks,offers]=await Promise.all([
+    get('cases',{limit:3}).catch(()=>null),get('news',{mode:'all',limit:4}).catch(()=>null),dataOf(get('sources/health'),null),
     dataOf(get('learn/tracks'),null),dataOf(get('token-offers'),null)]);
-  document.getElementById('home-stats').innerHTML=stat(t('案例','Cases'),cases.length||null)+stat(t('资讯来源','News sources'),health?.filter(x=>x.enabled).length)+
+  document.getElementById('home-stats').innerHTML=stat(t('案例','Cases'),catalog?.meta.total)+stat(t('资讯来源','News sources'),health?.filter(x=>x.enabled).length)+
     stat(t('实践路径','Tracks'),tracks?.length)+stat(t('厂商福利','Offers'),offers?.length);
-  document.getElementById('home-cases').innerHTML=cases.length?'<div class="grid">'+cases.slice(0,3).map(caseCard).join('')+'</div>':empty(t('暂无已发布案例','No published cases'));
-  document.getElementById('home-news').innerHTML=news.length?news.slice(0,4).map(newsPreview).join(''):empty(t('等待首轮信源采集','Waiting for the first source sync'),t('有数据后会显示原文与发布时间。','Source links appear after the first successful sync.'));
+  document.getElementById('home-cases').innerHTML=catalog?.data.length?'<div class="grid">'+catalog.data.map(caseCard).join('')+'</div>':
+    empty(catalog?t('暂无已发布案例','No published cases'):t('案例暂时无法载入','Cases are temporarily unavailable'));
+  document.getElementById('home-news').innerHTML=news?.data.length?news.data.map(newsPreview).join(''):
+    empty(news?t('等待首轮信源采集','Waiting for the first source sync'):t('资讯暂时无法载入','News is temporarily unavailable'));
 }
 
 async function catalog(ranking=false) {
-  const [result,all]=await Promise.all([get(ranking?'rankings':'cases',viewQuery()),get('cases',{limit:60})]);
+  if (!ranking && params.get('view')==='saved') return savedCases();
+  const result=await get(ranking?'rankings':'cases',{...viewQuery(),facets:1});
   const rows=result.data;
-  const models=[...new Set(all.data.map(i=>i.model))];
-  const modelOptions=[['',t('全部','All')],...models.map(model=>[model,model])];
+  const filterOptions=(values,label=value=>value)=>[['',t('全部','All')],...values.map(value=>[value,label(value)])];
+  const facets=result.meta.facets??{models:[],sources:[],tags:[]};
+  const type=params.get('type')==='stability'?'stability':'heat';
   const content=ranking
     ? '<div class="list">'+rows.map((item,i)=>'<div class="row"><span class="number">'+String(i+1+(Number(params.get('cursor'))||0)).padStart(2,'0')+
       '</span><div class="item-main">'+link('/cases/'+item.id,title(item))+'<p class="meta">'+esc(item.model)+' · '+esc(item.category)+'</p></div><b>'+
-      known(item[params.get('type')||'heat'])+'</b></div>').join('')+'</div>'
+      known(item[type])+'</b></div>').join('')+'</div>'
     : '<div class="grid">'+rows.map(caseCard).join('')+'</div>';
   const reason=ranking?t('排名需要已核验的互动或复测证据。','Rankings require verified engagement or retest evidence.'):'';
   root.innerHTML=heading('CASE INDEX',ranking?t('案例排行榜','Case rankings'):t('案例库','Case catalog'),
     ranking?t('传播热度与稳定度分别计算。稳定度展示有记录的分数及样本量。','Popularity and stability use separate evidence and scores.'):t('每条案例保留参考来源、可复制的提示词和练习产物。','Each case includes source references, a reusable prompt and an exercise.'))+
     caseTabs(ranking?'rankings':'cases')+form(
-      (ranking?select('type',t('榜单','Chart'),[['heat',t('传播榜','Popularity')],['stability',t('稳定榜','Stability')]],params.get('type')||'heat'):
+      (ranking?select('type',t('榜单','Chart'),[['heat',t('传播榜','Popularity')],['stability',t('稳定榜','Stability')]],type):
        searchbox(t('搜索','Search'),t('标题、作者、模型或 Prompt','Title, author, model or prompt')))+
-      select('category',t('分类','Category'),categoryOptions)+select('model',t('模型','Model'),modelOptions)+
-      (ranking?select('period',t('时段','Period'),[['',t('全部时间','All time')],['7d',t('近 7 天','7 days')],['30d',t('近 30 天','30 days')]]):
+      select('category',t('分类','Category'),categoryOptions)+select('model',t('模型','Model'),filterOptions(facets.models))+
+      select('period',t('时段','Period'),[['',t('全部时间','All time')],['7d',t('近 7 天','7 days')],['30d',t('近 30 天','30 days')]])+
+      (ranking?'':
        select('sort',t('排序','Sort'),[['latest',t('最新','Latest')],['heat',t('传播热度','Popularity')],['stability',t('稳定度','Stability')]],params.get('sort')||'latest')+
-       select('tag',t('主题','Topic'),[['',t('全部','All')],['coding','AI Coding'],['retrieval','RAG'],['agents','MCP'],['multimodal',t('多模态','Multimodal')]])))+
-    (ranking?'<p class="meta" style="margin-bottom:14px">'+status(result.meta)+(params.get('type')==='stability'?
-    t(' · 口径为已记录的评审平均分与样本量。',' · Mean of recorded review scores and sample size.'):
+       select('sourceHost',t('来源','Source'),filterOptions(facets.sources))+
+       select('tag',t('主题','Topic'),filterOptions(facets.tags,tag=>topicNames[tag]??tag))))+
+    (ranking?'<p class="meta" style="margin-bottom:14px">'+status(result.meta)+(type==='stability'?
+    t(' · 采用已完成人工判定的评审分与样本量。',' · Uses scores and sample sizes from completed human reviews.'):
     t(' · 同平台同类比较。互动分位 85% + 增速分位 15%，按 7 天半衰期衰减。',' · Compare by platform and category. Engagement percentile 85%, speed percentile 15%, with a 7-day half-life.'))+'</p>':'')+
+    '<p class="meta results-count">'+t('匹配 '+result.meta.total+' 条','Matches: '+result.meta.total)+'</p>'+
     (rows.length?content:empty(t('暂无匹配记录','No matching records'),reason))+pagination(result.meta);
+}
+
+async function savedCases() {
+  const limit=24;
+  const ids=savedCaseIds().reverse();
+  const cursor=Math.min(Math.max(0,parseInt(params.get('cursor'),10)||0),Math.max(0,Math.floor((ids.length-1)/limit)*limit));
+  const batch=ids.slice(cursor,cursor+limit);
+  const {data}=batch.length?await get('cases',{ids:batch.join(','),limit}):{data:[]};
+  const byId=new Map(data.map(item=>[item.id,item]));
+  root.innerHTML=heading('',t('我的收藏','Saved cases'),t('在此浏览保存在当前浏览器的案例。','Browse cases saved in this browser.'))+caseTabs('saved')+
+    (batch.length?'<div class="grid">'+batch.map(id=>'<div class="saved-card">'+
+      (byId.has(id)?caseCard(byId.get(id)):empty(t('原案例已不可用','Case unavailable')))+
+      '<button class="button" data-remove-case="'+esc(id)+'">'+t('取消收藏','Remove from saved')+'</button></div>').join('')+'</div>':
+      empty(t('暂无收藏','No saved cases'),t('在案例详情页点击收藏，稍后可在这里找回。','Save any case from its detail page to find it here later.')))+
+    pagination({nextCursor:cursor+limit<ids.length?String(cursor+limit):null},limit,cursor);
+  root.querySelectorAll('[data-remove-case]').forEach(control=>control.addEventListener('click',()=>{
+    if(!storeSet('saved-cases',savedCaseIds().filter(id=>id!==control.dataset.removeCase))) {
+      return announce(t('无法写入本地收藏','Local storage unavailable'));
+    }
+    announce(t('已取消收藏','Removed from saved'));
+    refreshTop(savedCases);
+  }));
 }
 function testTile(test,showCase=true) {
   return '<div class="tile"><div class="tagline">'+pill(test.outcome,test.outcome==='人工失败'?'bad':'attention')+
@@ -106,12 +140,11 @@ function testTile(test,showCase=true) {
     (showCase?link('/cases/'+test.case_slug,t('关联案例 →','Related case →'),'text-link'):'')+'</div></div>';
 }
 async function caseDetail() {
-  const [{data:item},related,tests]=await Promise.all([get('cases/'+encodeURIComponent(parts[1])),
-    dataOf(get('cases',{limit:60}),[]),dataOf(get('cases/'+encodeURIComponent(parts[1])+'/retests'),[])]);
-  const saved=storeGet('saved-cases',[]);
+  const casePath='cases/'+encodeURIComponent(parts[1]);
+  const [{data:item},tests]=await Promise.all([get(casePath),dataOf(get(casePath+'/retests'),null)]);
+  const saved=savedCaseIds();
   const showAlt=!!item.enPrompt;
   const defaultPrompt=en&&showAlt?item.enPrompt:item.prompt;
-  const relevant=related.filter(x=>x.id!==item.id&&x.category===item.category).slice(0,3);
   root.innerHTML=heading('',title(item),item.summary,['/cases',t('← 案例库','← Case catalog')])+
     '<div class="layout-side"><article class="content">'+art(item)+
     '<section id="prompt"><h2>Prompt</h2><div class="actions">'+
@@ -121,8 +154,9 @@ async function caseDetail() {
       (item.input||item.output?'<div class="grid two"><div class="panel"><span class="meta">'+t('输入','Input')+'</span><pre>'+esc(item.input)+'</pre></div><div class="panel">'+
       '<span class="meta">'+t('编辑参考结果','Editorial reference result')+'</span><pre>'+esc(item.output)+'</pre></div></div>':empty(t('此案例未附练习产物','No exercise output included')))+
     '</section><section id="retests"><h2>'+t('复测记录','Retest evidence')+'</h2>'+
-      (tests.length?'<div class="grid two">'+tests.map(row=>testTile(row,false)).join('')+'</div>':empty(t('暂无独立复测','No independent retests'),t('编辑参考结果未计入复测分。','Editorial examples are excluded from retest scores.')))+
-    '</section>'+(relevant.length?'<section class="section">'+section(t('相关案例','Related examples'))+'<div class="grid">'+relevant.map(caseCard).join('')+'</div></section>':'')+
+      (tests?.length?'<div class="grid two">'+tests.map(row=>testTile(row,false)).join('')+'</div>':tests?
+        empty(t('暂无独立复测','No independent retests')):empty(t('复测记录暂时无法载入','Retest evidence is temporarily unavailable')))+
+    '</section><section class="section" id="related-cases" hidden></section>'+
     '</article><aside class="panel side"><div class="tagline">'+pill(item.category)+pill(item.rightsStatus,'ok')+'</div><h3>'+t('案例资料','Case record')+
     '</h3><div class="source-list"><div>'+t('作者','Author')+' '+link('/creators/'+item.authorId,item.author,'text-link')+'</div><div>'+
     t('参考模型','Model')+' '+link('/models/'+encodeURIComponent(item.model),item.model,'text-link')+'</div>'+
@@ -130,6 +164,7 @@ async function caseDetail() {
     t('稳定度','Stability')+' '+known(item.stability)+(item.stabilitySamples?' · '+item.stabilitySamples+' '+t('次评审','reviews'):'')+'</div>'+
     '<div>'+external(item.source,t('查看参考来源 ↗','Open reference ↗'))+'</div></div>'+
     '<div class="actions">'+button('/skills/'+item.id,t('查看 Skill','Open Skill'))+
+    button('/cases?view=saved',t('我的收藏','Saved cases'))+
     '<button id="save-case" class="button" aria-pressed="'+saved.includes(item.id)+'">'+(saved.includes(item.id)?t('已收藏','Saved'):t('收藏','Save'))+
     '</button><button id="share-case" class="button">'+t('复制链接','Share link')+'</button></div></aside></div>';
   bindCopy();
@@ -140,20 +175,26 @@ async function caseDetail() {
     });
   }
   document.getElementById('save-case').addEventListener('click',event=>{
-    const existing=storeGet('saved-cases',[]);
+    const existing=savedCaseIds();
     const active=!existing.includes(item.id);
     if(!storeSet('saved-cases',active?[...existing,item.id]:existing.filter(id=>id!==item.id)))return announce(t('无法写入本地收藏','Local storage unavailable'));
     event.target.textContent=active?t('已收藏','Saved'):t('收藏','Save');
     event.target.setAttribute('aria-pressed',String(active));
   });
   document.getElementById('share-case').addEventListener('click',()=>copy(location.href));
+  const related=dataOf(get('cases',{category:item.category,limit:4}),[]);
+  const relevant=(await related).filter(other=>other.id!==item.id).slice(0,3);
+  if (relevant.length) {
+    const panel=document.getElementById('related-cases');
+    panel.innerHTML=section(t('相关案例','Related examples'))+'<div class="grid">'+relevant.map(caseCard).join('')+'</div>';
+    panel.hidden=false;
+  }
 }
 async function caseGroup(kind) {
-  const {data:items}=await get('cases',{limit:60});
   const id=parts[1];
-  const rows=items.filter(x=>kind==='models'?x.model.toLowerCase()===id.toLowerCase():x.authorId===id);
+  const {data:rows,meta}=await get('cases',{cursor:params.get('cursor')??0,[kind==='models'?'model':'creator']:id});
   root.innerHTML=heading(kind,kind==='models'?id:rows[0]?.author||t('创作者','Creators'),t('已公开的相关案例','Published examples'),['/cases',t('← 案例库','← Cases')])+
-    (rows.length?'<div class="grid">'+rows.map(caseCard).join('')+'</div>':empty(t('没有相关案例','No related cases')));
+    (rows.length?'<div class="grid">'+rows.map(caseCard).join('')+'</div>':empty(t('没有相关案例','No related cases')))+pagination(meta);
 }
 async function retests() {
   const result=await get('retests',viewQuery());
@@ -193,9 +234,10 @@ const newsCategories=['模型','产品','开发者','行业','论文','社区','
 function newsItem(item) {
   const first=item.sources[0];
   const more=item.sources.length;
+  const related=(item.entities??[]).map(entity=>link(url('/map',{entity:entity.id}),entity.name,'chip')).join('');
   return '<article class="row news-row"><div class="tagline">'+pill(item.category)+' <span class="meta">'+date(item.publishedAt,true)+
     '</span></div><h3>'+external(first.url,item.title)+'</h3><div class="actions"><span class="meta">'+esc(first.source)+'</span>'+
-    link(url('/map',{q:item.title}),t('查看相关实体 →','Find entities →'),'text-link')+'</div><details><summary>'+
+    (related?'<div class="actions" aria-label="'+t('相关图谱实体','Related graph entities')+'">'+related+'</div>':'')+'</div><details><summary>'+
     t(more>1?'查看 '+more+' 条原始来源':'查看原始来源',more+' source'+(more===1?'':'s'))+'</summary><div class="source-list">'+
     item.sources.map(s=>'<div>'+external(s.url,s.source+' · '+s.title)+'<p class="meta">'+t('发布','Published')+' '+date(s.publishedAt,true)+
     ' · '+t('抓取','Collected')+' '+date(s.fetchedAt,true)+'</p></div>').join('')+'</div></details></article>';
@@ -203,7 +245,7 @@ function newsItem(item) {
 async function radar() {
   const view=params.get('view')??'stream';
   const healthView=view==='health';
-  const [result,health]=await Promise.all([get('news',viewQuery()),get('sources/health')]);
+  const [result,health]=await Promise.all([healthView?null:get('news',viewQuery()),get('sources/health')]);
   const mode=params.get('mode')||'curated';
   const modeLink=next=>url('/radar',{...Object.fromEntries(params),mode:next,cursor:null});
   const healthRows=health.data.map(s=>'<article class="source-card"><div class="tagline">'+pill(s.enabled?(s.error?t('源站异常','Source error'):s.success_at?t('已连通','Healthy'):t('待采集','Pending')):t('已暂停','Paused'),s.error?'attention':'ok')+
@@ -211,13 +253,13 @@ async function radar() {
     '<div class="meta">'+t('最后成功','Last success')+' '+date(s.success_at,true)+'</div><div class="meta">'+t('成功率','Success rate')+' '+
     (s.attempts?Math.round(100*(s.attempts-s.failures)/s.attempts)+'%':'—')+'</div>'+(s.error?'<div class="meta">'+esc(s.error)+'</div>':'')+'</div></article>').join('');
   let lastDay='';
-  const grouped=result.data.map(item=>{
+  const grouped=result?.data.map(item=>{
     const day=date(item.publishedAt);
     const divider=day===lastDay?'':'<div class="day">'+day+'</div>';
     lastDay=day;
     return divider+newsItem(item);
   }).join('');
-  const top=[...result.data].sort((a,b)=>(b.score+b.sources.length*2)-(a.score+a.sources.length*2)||b.publishedAt.localeCompare(a.publishedAt)).slice(0,3);
+  const top=view==='classic'?[...result.data].sort((a,b)=>(b.score+b.sources.length*2)-(a.score+a.sources.length*2)||b.publishedAt.localeCompare(a.publishedAt)).slice(0,3):[];
   const story=params.get('story');
   const toolbar=chips([['/radar',t('信息流','Stream'),view==='stream'],['/radar?view=classic',t('经典视图','Classic'),view==='classic'],
     ['/radar?view=health',t('来源健康','Source health'),healthView]]);
@@ -238,7 +280,7 @@ async function radar() {
 async function graph() {
   const three=parts[1]==='3d';
   const windowSize=params.get('window')==='24h'?'24h':'7d';
-  const {data,meta}=await get(three?'map/terrain':'map/graph',{window:windowSize});
+  const [{data,meta},{graphViz}]=await Promise.all([get(three?'map/terrain':'map/graph',{window:windowSize}),import('./visuals.js')]);
   const initial=params.get('entity');
   let q=params.get('q')??'';
   const hasHeat=data.nodes.some(item=>item.heat!==null);
@@ -247,7 +289,8 @@ async function graph() {
     const term=simple(value);
     return !term||[item.name,...item.aliases,item.type].some(name=>simple(name).includes(term)||(' '+term+' ').includes(' '+simple(name)+' '));
   };
-  let selected=data.nodes.find(n=>n.id===initial)?.id??(q?data.nodes.find(n=>matches(n,q))?.id:null)??data.nodes.find(n=>n.heat>0)?.id??data.nodes[0]?.id;
+  const bestMatch=()=>data.nodes.find(n=>simple(n.name)===simple(q))??data.nodes.find(n=>matches(n,q));
+  let selected=data.nodes.find(n=>n.id===initial)?.id??(q?bestMatch()?.id:null)??data.nodes.find(n=>n.heat>0)?.id??data.nodes[0]?.id;
   let viz;
   root.innerHTML=heading('ENTITY GRAPH',three?t('热点地形','Terrain view'):t('热点图谱','Entity graph'),
     t('查找 AI 实体、官方关系与近期新闻。新闻热度按 24 小时半衰期衰减。','Find AI entities, official relations and news with a 24-hour heat half-life.'))+
@@ -269,7 +312,9 @@ async function graph() {
     selected=id;
     const node=data.nodes.find(item=>item.id===id);
     if(!node)return;
-    const query=new URL(location.href);query.searchParams.set('entity',id);history.replaceState(null,'',query);
+    const query=new URL(location.href);query.searchParams.set('entity',id);
+    if(q)query.searchParams.set('q',q);else query.searchParams.delete('q');
+    if(query.href!==location.href)history.replaceState(null,'',query);
     const edges=data.edges.filter(e=>e.from===id||e.to===id);
     const connections=edges.map(edge=>{
       const next=data.nodes.find(n=>n.id===(edge.from===id?edge.to:edge.from));
@@ -297,7 +342,9 @@ async function graph() {
   }
   viz=graphViz(document.getElementById('graph-canvas'),document.getElementById('graph-overlay'),data,{
     three,selected,onSelect:pick,onFallback:()=>{
-      document.getElementById('graph-panel').innerHTML='<div style="padding:20px">'+empty(t('3D 渲染不可用','3D rendering is unavailable'))+'</div>';
+      const panel=document.getElementById('graph-panel');
+      panel.classList.add('viz-fallback');
+      panel.innerHTML=empty(t('3D 渲染不可用','3D rendering is unavailable'),t('可切换到 2D，或使用下方列表继续查看实体。','Switch to 2D or explore entities using the list below.'));
     }
   });
   pick(selected,!!q);
@@ -307,7 +354,7 @@ async function graph() {
     entityButtons();
   });
   input.addEventListener('keydown',event=>{
-    if(event.key==='Enter'){const node=data.nodes.find(n=>matches(n,q));if(node)pick(node.id,true);}
+    if(event.key==='Enter'){const node=bestMatch();if(node)pick(node.id,true);}
   });
 }
 
@@ -383,7 +430,7 @@ async function learn() {
 }
 
 async function ocean() {
-  const {data,meta}=await get('token-offers');
+  const [{data,meta},{oceanViz},{offerStatus}]=await Promise.all([get('token-offers'),import('./visuals.js'),import('./club.js')]);
   root.innerHTML=heading('COMPUTE OCEAN',t('算力海洋','Compute ocean'),t('点击水面投喂，移动指针扰动鱼群。带有厂商简称的鱼可以打开福利详情。','Scatter food, disturb the shoal, or select a labeled fish to open its offer.'))+
     '<div class="dark-panel ocean-panel"><canvas id="ocean-art" role="img" aria-label="'+t('字符画海洋，福利也可以从下方列表进入','ASCII ocean. Offers are also available below.')+
     '"></canvas><div class="ocean-note meta">ASCII · '+t('福利探索','OFFER EXPLORER')+'</div></div><section class="section" id="ocean-offers">'+
@@ -424,6 +471,8 @@ async function search() {
 const routes = {
   '':home,cases:()=>parts[1]?caseDetail():catalog(),rankings:()=>catalog(true),retests,skills,
   creators:()=>caseGroup('creators'),models:()=>caseGroup('models'),daily,radar,map:graph,learn,'token-ocean':ocean,
-  'token-club':()=>parts[1]?renderOffer(parts[1]):renderClub(),connect,admin:renderAdmin,submit:renderSubmit,search
+  'token-club':async()=>{const {renderOffer,renderClub}=await import('./club.js');return parts[1]?renderOffer(parts[1]):renderClub();},
+  connect,admin:async()=>{const {renderAdmin}=await import('./admin.js');return renderAdmin();},
+  submit:async()=>{const {renderSubmit}=await import('./admin.js');return renderSubmit();},search
 };
 refreshTop(routes[parts[0]]||home);

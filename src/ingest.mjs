@@ -198,22 +198,26 @@ export function cluster(rows) {
     if (!group.sources.some(a=>a.url===article.url)) group.sources.push(article);
     byTitle.set(key,group);
   }
-  return groups.map(({key,...group})=>({...group,matchNote:group.sources.length>1?'根据标题与发布时间合并':'单条来源'}));
+  return groups.map(({key,...group})=>({...group,entities:matchingEntities(group.sources),
+    matchNote:group.sources.length>1?'根据标题与发布时间合并':'单条来源'}));
 }
 
 export const newsRows = (db,since) => all(db,`SELECT n.*,s.label FROM news n JOIN sources s ON s.id=n.source_id
   WHERE n.published_at>=? AND s.enabled=1 ORDER BY n.published_at DESC LIMIT 300`,since);
 
-function mentions(entity, title) {
-  const words = ' '+titleKey(title)+' ';
-  return [entity.name,...entity.aliases].some(name=>words.includes(' '+titleKey(name)+' '));
+const entityTerms=entities.map(({id,name,aliases})=>({id,name,terms:[name,...aliases].map(alias=>' '+titleKey(alias)+' ')}));
+
+function matchingEntities(articles) {
+  const titles=articles.map(article=>' '+titleKey(article.title)+' ');
+  return entityTerms.filter(({terms})=>terms.some(term=>titles.some(title=>title.includes(term))))
+    .map(({id,name})=>({id,name}));
 }
 
 export function computeGraph(rows, asOf) {
   const cutoff = Date.parse(asOf);
   const groups = cluster(rows);
   const nodes = entities.map(entity=>{
-    const items=groups.filter(group=>group.sources.some(article => mentions(entity,article.title)));
+    const items=groups.filter(group=>group.entities.some(match=>match.id===entity.id));
     const score=(before=0)=>items.reduce((total,group)=>{
       const age=cutoff-before-Date.parse(group.publishedAt);
       return age>=0 ? total+group.score/100*Math.pow(2,-age/hours(24))*(1+.2*(new Set(group.sources.map(a=>a.sourceId)).size-1)) : total;
@@ -225,9 +229,9 @@ export function computeGraph(rows, asOf) {
   });
   const edges = new Map(relations.map(([a,b,type])=>[[a,b].sort().join('/'),{from:a,to:b,type,weight:1,evidence:[]}]));
   for (const group of groups) {
-    const matches=nodes.filter(node=>group.sources.some(article=>mentions(node,article.title)));
+    const matches=group.entities.map(entity=>entity.id);
     for (let i=0;i<matches.length;i++) for (let j=i+1;j<matches.length;j++) {
-      const [a,b]=[matches[i].id,matches[j].id].sort();
+      const [a,b]=[matches[i],matches[j]].sort();
       const key=a+'/'+b;
       const edge=edges.get(key)??{from:a,to:b,type:'新闻共现',weight:0,evidence:[]};
       edge.weight++;

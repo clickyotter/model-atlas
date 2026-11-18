@@ -23,11 +23,26 @@ test('serves six deep links, frontend, original case search and article',async()
     assert.match(await response.text(),/模型图鉴/);
   }
   assert.match(await (await request('/visuals.js')).text(),/webgl/);
+  const icon=await request('/favicon.ico');
+  assert.equal(icon.headers.get('content-type'),'image/png');
+  assert.equal(Buffer.from(await icon.arrayBuffer()).subarray(1,4).toString(),'PNG');
   const catalog=await output(await request('/api/v1/cases?q=RAG'));
   assert.equal(catalog.data[0].id,'traceable-rag');
   assert.equal(catalog.data[0].heat,null);
   assert.match(await (await request('/skills/traceable-rag/SKILL.md')).text(),/claims/);
   assert.equal((await request('/api/v1/cases/unknown')).status,404);
+});
+
+test('combines case facets and keeps saved lookups limited to their selected IDs',async()=>{
+  const results=await output(await request('/api/v1/cases?sourceHost=developers.openai.com&tag=coding&limit=1&facets=1'));
+  assert.deepEqual(results.data.map(item=>item.id),['safe-change']);
+  assert.equal(results.meta.total,1);
+  assert.ok(results.meta.facets.sources.includes('platform.openai.com'));
+  const saved=await output(await request('/api/v1/cases?ids=safe-change,unknown,scene-board&limit=1'));
+  assert.equal(saved.meta.total,2);
+  assert.equal(saved.meta.nextCursor,'1');
+  assert.equal((await output(await request('/api/v1/cases?ids='))).meta.total,0);
+  assert.ok((await output(await request('/api/v1/cases?q=verifiable%20task'))).data.some(item=>item.id==='safe-change'));
 });
 
 test('parses RSS and Atom, preserves sources and computes observed heat',()=>{
@@ -40,6 +55,8 @@ test('parses RSS and Atom, preserves sources and computes observed heat',()=>{
   assert.equal(articles[0].url,'https://example.org/1?ok=1');
   const records=articles.map(a=>({title:a.title,title_key:a.titleKey,url:a.url,source_id:a.sourceId,label:a.sourceId,published_at:a.publishedAt,fetched_at:a.fetchedAt,category:a.category,ai_score:a.aiScore}));
   assert.equal(cluster(records)[0].sources.length,2);
+  assert.deepEqual(cluster(records)[0].entities,[{id:'codex',name:'Codex'},{id:'gemini',name:'Gemini'}]);
+  assert.deepEqual(cluster([{...records[0],title:'Google Newsroom',title_key:'google newsroom'}])[0].entities,[{id:'google',name:'Google'}]);
   assert.ok(computeGraph(records,now).nodes.find(x=>x.id==='gemini').heat>0);
   assert.equal(computeGraph(records,now).nodes.find(x=>x.id==='deepseek').heat,null);
 });
@@ -62,6 +79,18 @@ test('requires identity and same-origin writes, moderates cases and persists ret
   assert.equal((await output(await request('/api/v1/cases/'+id))).data.stability,23);
   assert.equal((await output(await request('/api/v1/cases/'+id+'/retests'))).data[0].outcome,'人工失败');
   assert.equal((await output(await request('/api/admin/overview',{headers:admin}))).audits.length,4);
+  assert.equal((await send('/api/admin/retests',{...retest,outcome:'待人工判定',score:100},admin)).status,201);
+  const detail=(await output(await request('/api/v1/cases/'+id))).data;
+  assert.equal(detail.stability,23);
+  assert.equal(detail.stabilitySamples,1);
+  assert.equal((await output(await request('/api/v1/cases/'+id+'/retests'))).data.length,2);
+  const rankings=await output(await request('/api/v1/rankings?type=stability'));
+  assert.equal(rankings.data[0].stability,23);
+  assert.ok(rankings.meta.asOf);
+  const firstPage=await output(await request('/api/v1/retests?limit=1'));
+  assert.equal(firstPage.meta.nextCursor,'1');
+  const nextPage=await output(await request('/api/v1/retests?limit=1&cursor=1'));
+  assert.notEqual(firstPage.data[0].id,nextPage.data[0].id);
 });
 
 test('provider time zones and rolling records honor their boundaries',()=>{

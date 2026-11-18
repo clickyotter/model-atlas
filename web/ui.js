@@ -9,7 +9,9 @@ export const date=(value,withTime=false)=>value&&Number.isFinite(Date.parse(valu
   new Intl.DateTimeFormat(locale,{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',
     ...(withTime?{hour:'2-digit',minute:'2-digit',hourCycle:'h23'}:{})}).format(new Date(value)):'—';
 export const path=location.pathname.replace(/\/$/,'')||'/';
-export const parts=path.split('/').slice(1).map(seg=>decodeURIComponent(seg));
+export const parts=path.split('/').slice(1).map(seg=>{
+  try {return decodeURIComponent(seg);} catch {return seg;}
+});
 export const url=(pathname,data={})=>{
   const [target,tail]=pathname.split('?');
   const query=new URLSearchParams(tail);
@@ -45,8 +47,9 @@ export function form(body,action=path,label=t('筛选','Apply')) {
   return '<form class="toolbar" method="get" action="'+esc(action)+'">'+(en?'<input type="hidden" name="lang" value="en">':'')+
     body+'<button class="button dark">'+esc(label)+'</button></form>';
 }
-export function pagination(meta,limit=24) {
-  const cursor=Math.max(0,Number(params.get('cursor'))||0);
+export function pagination(meta,limit=Math.min(60,Math.max(1,parseInt(params.get('limit'),10)||24)),
+  cursor=Math.max(0,parseInt(params.get('cursor'),10)||0)) {
+  if (!cursor&&!meta.nextCursor) return '';
   const page=(offset,label)=>button(url(path,{...Object.fromEntries(params),cursor:offset}),label);
   return '<div class="pagination">'+(cursor?page(String(Math.max(0,cursor-limit)),t('上一页','Previous')):'')+
     (meta.nextCursor?page(meta.nextCursor,t('下一页','Next')):'')+'</div>';
