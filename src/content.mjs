@@ -83,7 +83,7 @@ export const tracks = [
 export const entities = [
   ['openai','OpenAI','公司','https://openai.com/',[]],
   ['codex','Codex','工具','https://developers.openai.com/codex/',['OpenAI Codex']],
-  ['gpt','GPT','模型','https://platform.openai.com/docs/models',['GPT-5','GPT-6']],
+  ['gpt','GPT','模型','https://platform.openai.com/docs/models',['GPT-5','GPT-6','GPT-6.2']],
   ['google','Google','公司','https://blog.google/',['Google DeepMind','DeepMind']],
   ['gemini','Gemini','模型','https://ai.google.dev/',['Gemini API']],
   ['anthropic','Anthropic','公司','https://www.anthropic.com/',[]],

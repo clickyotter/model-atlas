@@ -36,6 +36,7 @@ export async function renderAdmin(){
   if(!session.admin){root.innerHTML=page+empty('当前账号没有管理权限');return;}
   const [data,cases]=await Promise.all([api('/api/admin/overview'),get('cases',{limit:60})]);
   const reviewLabels={'待溯源':'待版权核验','待版权核验':'待复测','待复测':'已发布'};
+  const caseOptions=cases.data.map(item=>'<option value="'+esc(item.id)+'">'+esc(item.title)+'</option>').join('');
   root.innerHTML=page+'<div class="actions"><form data-refresh><input name="kind" type="hidden" value="all"><button class="button dark">立即采集与核验</button></form>'+
     '<form data-refresh><input name="kind" type="hidden" value="offers"><button class="button">核验福利来源</button></form>'+
     button('/radar?view=health','公开信源状态')+'</div>'+
@@ -48,13 +49,20 @@ export async function renderAdmin(){
     '<label>栏目'+select('category',['模型','产品','开发者','行业','论文','社区'])+'</label><p class="meta">允许域名 '+data.approvedHosts.map(esc).join('、')+
     '</p><button class="button dark">新增信源</button></form></details></section>'+
     '<section class="panel">'+section('新增人工复测')+'<form class="form form-wide" id="retest-form">'+
-    '<label class="span">案例<select name="caseId">'+cases.data.map(item=>'<option value="'+esc(item.id)+'">'+esc(item.title)+'</option>').join('')+'</select></label>'+
+    '<label class="span">案例<select name="caseId">'+caseOptions+'</select></label>'+
     input('model','模型')+input('version','版本')+input('cost','费用','例如 0.002 USD','text',false)+
     '<label>人工结果'+select('outcome',['待人工判定','人工成功','人工失败'])+'</label>'+
     '<label>评分（可选）<input type="number" name="score" min="0" max="100" step="0.1"></label>'+input('evidence','证据链接','https://','url')+
     '<label class="span">运行参数<textarea name="parameters" maxlength="1500" required></textarea></label>'+
     '<label class="span">结果与失败说明<textarea name="note" maxlength="2000" required></textarea></label>'+
     '<button class="button dark span">保存复测证据</button></form></section></div>'+
+    '<section class="section panel">'+section('登记案例互动快照',null,'仅录入已取得许可且可核对的数据。同平台、同类至少有两个案例各达到两次有效快照，才会生成传播榜。')+
+    '<form class="form form-wide" id="metrics-form"><label class="span">案例<select name="caseId">'+caseOptions+'</select></label>'+
+    input('platform','来源平台','例如 GitHub')+input('evidence','互动证据链接','https://','url')+
+    input('capturedAt','采集时间（带时区）','2026-11-18T14:00:00+08:00')+
+    ['likes','comments','shares','bookmarks'].map((name,i)=>'<label>'+['点赞','评论','转发','收藏'][i]+'<input name="'+name+
+      '" type="number" min="0" max="1000000000" step="1" required></label>').join('')+
+    '<button class="button dark span">保存互动快照</button></form></section>'+
     '<section class="section">'+section('投稿审核与勘误')+
     (data.submissions.length?'<div class="grid">'+data.submissions.map(r=>'<article class="panel"><div class="tagline">'+pill(r.kind==='case'?'案例':'勘误')+pill(r.status)+
     '<span class="meta">'+date(r.created_at,true)+'</span></div><h3>'+esc(r.title)+'</h3><p>'+esc(r.detail)+'</p><p>'+external(r.url,'打开来源 ↗')+'</p>'+
@@ -81,6 +89,11 @@ export async function renderAdmin(){
   wire('[data-review]',async form=>{
     const values=fromForm(form);
     await post('/api/admin/review',{...values,rights:values.rights==='on'});announce('审核已保存');refreshTop(renderAdmin);
+  });
+  wire('#metrics-form',async form=>{
+    const values=fromForm(form);
+    for(const key of ['likes','comments','shares','bookmarks']) values[key]=Number(values[key]);
+    await post('/api/admin/metrics',values);announce('互动快照已保存');refreshTop(renderAdmin);
   });
   wire('#retest-form',async form=>{
     const values=fromForm(form);

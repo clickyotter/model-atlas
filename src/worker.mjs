@@ -1,6 +1,7 @@
 import {cases, tracks, entities, relations, offers, sources, editorialAt} from './content.mjs';
 import {all, one, run, updater, newsRows, cluster, computeGraph, httpsUrl, approvedHosts, titleKey, ensureSources} from './ingest.mjs';
-import {shell, assets} from './generated.mjs';
+import {rankCases} from './ranking.mjs';
+import {shell, assets, lessons} from './generated.mjs';
 
 const headers = {
   'x-content-type-options':'nosniff','referrer-policy':'strict-origin-when-cross-origin',
@@ -18,7 +19,6 @@ function wrap(data,{asOf=null,dataStatus='fresh',sourceUrls=[],nextCursor=null}=
 const plain = (text,type='text/plain; charset=utf-8',cache='public, max-age=180') =>
   new Response(text,{headers:{...headers,'content-type':type,'cache-control':cache}});
 const esc = text=>String(text??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[char]);
-const locales = new Set(['zh','en']);
 const categories = ['编程','数据','影像','文本'];
 const reviewStates = ['待溯源','待版权核验','待复测','已发布','驳回','已处理'];
 function identity(request, env) {
@@ -44,14 +44,19 @@ async function readAPI(path,query,db) {
   if (path==='/api/v1/cases' || path==='/api/v1/rankings' || path==='/api/v1/skills' || path==='/api/v1/daily' ||
     path==='/api/v1/retests' || path.startsWith('/api/v1/cases/')) {
     const catalog=await caseData(db);
-    const tests=db ? await all(db,'SELECT * FROM retests ORDER BY tested_at DESC LIMIT 250') : [];
+    const [tests,snapshots]=db?await Promise.all([
+      all(db,'SELECT * FROM retests ORDER BY tested_at DESC LIMIT 250'),
+      all(db,`SELECT case_slug,captured_at,source,platform,likes,comments,shares,bookmarks FROM
+        (SELECT *,ROW_NUMBER() OVER(PARTITION BY case_slug ORDER BY captured_at DESC) AS rn FROM case_metrics)
+        WHERE rn<=2 ORDER BY captured_at DESC`)
+    ]):[[],[]];
     const scores=new Map();
     for (const test of tests.filter(test=>test.score!==null)) {
       const list=scores.get(test.case_slug)??[];
       list.push(test.score);
       scores.set(test.case_slug,list);
     }
-    const items=catalog.map(item=>{
+    const items=rankCases(catalog,snapshots).map(item=>{
       const sample=scores.get(item.id)??[];
       return {...item,stability:sample.length?Math.round(sample.reduce((a,b)=>a+b,0)/sample.length):null,stabilitySamples:sample.length};
     });
@@ -81,7 +86,8 @@ async function readAPI(path,query,db) {
     const period=query.get('period');
     const since=period==='7d'||period==='30d' ? new Date(Date.now()-hours(period==='7d'?168:720)).toISOString() : '';
     const ranking=path.endsWith('rankings');
-    const type=query.get('type')??'heat';
+    const requestedType=query.get('type');
+    const type=['heat','stability'].includes(requestedType)?requestedType:'heat';
     const sort=ranking?type:query.get('sort');
     const rows=items.filter(i=>(!q||[i.title,i.enTitle,i.summary,i.author,i.prompt,i.model].join(' ').toLowerCase().includes(q)) &&
       (!category||i.category===category)&&(!model||i.model.toLowerCase()===model.toLowerCase())&&
@@ -90,12 +96,15 @@ async function readAPI(path,query,db) {
       if (sort==='heat'||sort==='stability') return (b[sort]??-1)-(a[sort]??-1);
       return b.publishedAt.localeCompare(a.publishedAt);
     });
-    return page(ranking?sorted.filter(i=>i[type]!=null):sorted,query,{asOf,dataStatus:ranking&&!sorted.some(i=>i[type]!=null)?'partial':'fresh'});
+    const ranked=ranking?sorted.filter(i=>i[type]!=null):sorted;
+    const update=ranking&&type==='heat'?ranked.map(item=>item.heatEvidence?.asOf).filter(Boolean).sort().at(-1)??asOf:asOf;
+    return page(ranked,query,{asOf:update,dataStatus:ranking&&!ranked.length?'partial':'fresh'});
   }
-  if (path==='/api/v1/learn/tracks') return wrap(tracks,{asOf:editorialAt,sourceUrls:tracks.map(t=>t.source)});
+  if (path==='/api/v1/learn/tracks') return wrap(tracks.filter(track=>!query.get('q')||[track.title,track.summary,track.articleTitle,track.tag,lessons[track.id]]
+    .join(' ').toLowerCase().includes(query.get('q').toLowerCase().slice(0,150))),{asOf:editorialAt,sourceUrls:tracks.map(t=>t.source)});
   if (path.startsWith('/api/v1/learn/articles/')) {
     const item=tracks.find(t=>t.articleId===path.split('/').at(-1));
-    return item?wrap(item,{asOf:editorialAt,sourceUrls:[item.source]}):false;
+    return item?wrap({...item,markdown:lessons[item.id]},{asOf:editorialAt,sourceUrls:[item.source]}):false;
   }
   if (path.startsWith('/api/v1/token-offers')) {
     const id=path.match(/^\/api\/v1\/token-offers\/([^/]+)\/history$/)?.[1];
@@ -239,6 +248,22 @@ async function writeAPI(request,env,url,user) {
       db.prepare(`INSERT INTO audit SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM submissions WHERE id=? AND updated_at=?)`)
         .bind(crypto.randomUUID(),user.id,'审核 '+status,row.id,now,row.id,now)]);
     return output({ok:true},200,'no-store');
+  }
+  if (path==='/api/admin/metrics') {
+    const slug=getText(body,'caseId',100),platform=getText(body,'platform',70).toLowerCase(),evidence=httpsUrl(getText(body,'evidence',1000));
+    const captured=Date.parse(getText(body,'capturedAt',40));
+    const counts=['likes','comments','shares','bookmarks'].map(key=>body[key]);
+    if(!(await caseData(db)).some(item=>item.id===slug)||!platform||!evidence||!Number.isFinite(captured)||
+      captured>Date.now()||Date.now()-captured>hours(24*60)||
+      counts.some(value=>!Number.isSafeInteger(value)||value<0||value>1_000_000_000)) return error('请填写有效案例、平台、UTC 快照时间、来源与完整互动数');
+    const stamp=new Date(captured).toISOString();
+    const [result]=await db.batch([
+      db.prepare('INSERT INTO case_metrics VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(case_slug,captured_at) DO NOTHING')
+        .bind(slug,stamp,user.id,evidence.href,platform,...counts),
+      db.prepare('INSERT INTO audit SELECT ?,?,?,?,? WHERE changes()>0')
+        .bind(crypto.randomUUID(),user.id,'记录互动快照',slug,now)
+    ]);
+    return result.meta.changes?output({ok:true},201,'no-store'):error('该时间已有互动快照',409);
   }
   if (path==='/api/admin/retests') {
     const slug=getText(body,'caseId',100),model=getText(body,'model',70),version=getText(body,'version',70);

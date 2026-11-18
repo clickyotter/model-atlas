@@ -73,3 +73,26 @@ test('provider time zones and rolling records honor their boundaries',()=>{
   assert.ok(activeRecord([row],google,at));
   assert.equal(activeRecord([row],google,Date.parse('2026-11-18T08:00:00Z')),undefined);
 });
+
+test('case popularity compares verified recent snapshots and leaves unknown scores empty',async()=>{
+  const ids=['safe-change','tool-contract'];
+  const now=Date.now();
+  for(const [index,caseId] of ids.entries()){
+    for(const [offset,likes] of [[4,12],[1,20+19*index]]){
+      const result=await send('/api/admin/metrics',{caseId,platform:'GitHub',evidence:'https://example.net/evidence',
+        capturedAt:new Date(now-offset*3600000).toISOString(),likes,comments:2,shares:1,bookmarks:0},admin);
+      assert.equal(result.status,201);
+    }
+  }
+  const ranking=await output(await request('/api/v1/rankings?type=heat&category='+encodeURIComponent('编程')));
+  assert.equal(ranking.data.length,2);
+  assert.equal(ranking.data[0].id,'tool-contract');
+  assert.equal(ranking.data[0].heatEvidence.peerCount,2);
+});
+
+test('searches full Git-backed Markdown articles',async()=>{
+  const matches=await output(await request('/api/v1/learn/tracks?q=validateCitation'));
+  assert.equal(matches.data[0].id,'retrieval');
+  const article=await output(await request('/api/v1/learn/articles/retrieval-practice'));
+  assert.match(article.data.markdown,/function validateCitation/);
+});

@@ -118,10 +118,15 @@ export function graphViz(canvas,overlay,graph,{three=false,selected,onSelect,onF
   const map=layout(graph.nodes,graph.edges);
   if (three) for(const pt of map.values()){pt.x*=.83;pt.y*=.83;}
   let points=[],sx=0,sy=0,zoom=1,angle=-.64,press=null,hover=null;
-  let webgl=three?terrainCanvas(canvas):null;
+  const webgl=three?terrainCanvas(canvas):null;
   const controls=canvas.closest('.viz-wrapper').querySelector('.viz-zoom');
-  if(three&&!webgl) {onFallback();return {focus:()=>{}};}
-  if(three)canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();onFallback();});
+  let software=three&&!webgl;
+  const markSoftware=()=>{
+    canvas.closest('.viz-wrapper').querySelector('.viz-badge .pill').textContent='CANVAS / 3D';
+    software=true;
+  };
+  if(software) markSoftware();
+  if(webgl)canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();markSoftware();draw();});
   const peaks=[...map.values()].filter(n=>n.heat>0);
   const elevation=(x,y)=>clamp(peaks.reduce((z,n)=>z+n.heat*.008*Math.exp(-18*((x-n.x)**2+(y-n.y)**2)),0),0,1.05);
   const labels=(c,center,w)=>{
@@ -142,7 +147,8 @@ export function graphViz(canvas,overlay,graph,{three=false,selected,onSelect,onF
     if (!canvas.isConnected) return;
     if(three) {
       const {c,w,h}=context(overlay);size(canvas);
-      if (!c||!w||!h) return;
+      if (!c||!w||!h) {onFallback();return;}
+      if(software){c.fillStyle='#162923';c.fillRect(0,0,w,h);}
       const scale=Math.min(w,h*1.42)*.38*zoom;
       const p=(x,y,z=0)=>{
         const rx=x*Math.cos(angle)-y*Math.sin(angle),ry=x*Math.sin(angle)+y*Math.cos(angle);
@@ -159,13 +165,19 @@ export function graphViz(canvas,overlay,graph,{three=false,selected,onSelect,onF
       for(const {a,b,d,q} of cells.sort((x,y)=>x.depth-y.depth)){
         const z=(a.z+q.z)*.5,band=Math.floor(z*6)/6,light=z*.17;
         const col=[.13+band*.53+light,.25+band*.43+light,.21+band*.10+light];
+        if(software) {
+          c.beginPath();c.moveTo(a.p[0],a.p[1]);c.lineTo(b.p[0],b.p[1]);c.lineTo(q.p[0],q.p[1]);c.lineTo(d.p[0],d.p[1]);c.closePath();
+          c.fillStyle='rgb('+col.map(channel=>Math.round(channel*255)).join(',')+')';c.fill();
+          c.strokeStyle='#b7deb313';c.lineWidth=.6;c.stroke();
+          continue;
+        }
         verts.push(...out(a.p,col),...out(b.p,col),...out(d.p,col),...out(b.p,col),...out(q.p,col),...out(d.p,col));
         if(Math.floor(a.z*6)!==Math.floor(b.z*6)||Math.floor(a.z*6)!==Math.floor(d.z*6)) {
           const col=[.29+z*.4,.47+z*.25,.34+z*.1];
           lines.push(...out(a.p,col),...out(b.p,col),...out(a.p,col),...out(d.p,col));
         }
       }
-      webgl(w,h,verts,lines);
+      if(!software)webgl(w,h,verts,lines);
       points=[...map.values()].map(n=>({...n,p:p(n.x,n.y,elevation(n.x,n.y)+.045),r:n.id===selected?6:4}));
       labels(c,null,w);
     } else {
@@ -225,7 +237,7 @@ export function graphViz(canvas,overlay,graph,{three=false,selected,onSelect,onF
 }
 
 export function oceanViz(canvas,offers,onSelect) {
-  let cw,ch,c,feed=null,pointer=null,frame=0,last=0,raf;
+  let cw,ch,c,feed=null,pointer=null,last=0,raf;
   const fishes=Array.from({length:innerWidth<620?19:38},(_,i)=>({
     x:((i*63+31)%113)/113,y:.14+(((i*29+14)%111)/111)*.73,
     dir:i%2?1:-1,pace:.00016+(i%7)*.000045,offer:offers[i%Math.max(offers.length,1)],big:i<offers.length,near:false
@@ -273,7 +285,7 @@ export function oceanViz(canvas,offers,onSelect) {
   }
   const redraw=time=>{
     if(!canvas.isConnected||document.hidden||reduce.matches){raf=undefined;return;}
-    if(time-last>=16){last=time;paint(time);frame++;}
+    if(time-last>=16){last=time;paint(time);}
     raf=requestAnimationFrame(redraw);
   };
   function restart(){if(raf!==undefined)cancelAnimationFrame(raf);raf=undefined;if(!document.hidden&&!reduce.matches)raf=requestAnimationFrame(redraw);}

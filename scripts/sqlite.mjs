@@ -1,10 +1,20 @@
 import {DatabaseSync} from 'node:sqlite';
-import {readFileSync} from 'node:fs';
+import {readFileSync,readdirSync} from 'node:fs';
 
 export function sqlite(location=':memory:') {
   const db=new DatabaseSync(location);
-  if(!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'").get())
-    db.exec(readFileSync(new URL('../drizzle/0000_atlas.sql',import.meta.url),'utf-8'));
+  const migrations=new URL('../drizzle/',import.meta.url);
+  db.exec('CREATE TABLE IF NOT EXISTS local_migrations (filename TEXT PRIMARY KEY)');
+  for(const file of readdirSync(migrations).filter(name=>name.endsWith('.sql')).sort()) {
+    if(db.prepare('SELECT filename FROM local_migrations WHERE filename=?').get(file))continue;
+    db.exec('BEGIN');
+    try {
+      const existed=file==='0000_atlas.sql'&&db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'").get();
+      if(!existed)db.exec(readFileSync(new URL(file,migrations),'utf-8'));
+      db.prepare('INSERT INTO local_migrations VALUES(?)').run(file);
+      db.exec('COMMIT');
+    } catch(error) {db.exec('ROLLBACK');throw error;}
+  }
   return {
     prepare(sql) {
       return {bind(...params) {

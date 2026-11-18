@@ -92,6 +92,9 @@ async function catalog(ranking=false) {
       (ranking?select('period',t('时段','Period'),[['',t('全部时间','All time')],['7d',t('近 7 天','7 days')],['30d',t('近 30 天','30 days')]]):
        select('sort',t('排序','Sort'),[['latest',t('最新','Latest')],['heat',t('传播热度','Popularity')],['stability',t('稳定度','Stability')]],params.get('sort')||'latest')+
        select('tag',t('主题','Topic'),[['',t('全部','All')],['coding','AI Coding'],['retrieval','RAG'],['agents','MCP'],['multimodal',t('多模态','Multimodal')]])))+
+    (ranking?'<p class="meta" style="margin-bottom:14px">'+status(result.meta)+(params.get('type')==='stability'?
+    t(' · 口径为已记录的评审平均分与样本量。',' · Mean of recorded review scores and sample size.'):
+    t(' · 同平台同类比较。互动分位 85% + 增速分位 15%，按 7 天半衰期衰减。',' · Compare by platform and category. Engagement percentile 85%, speed percentile 15%, with a 7-day half-life.'))+'</p>':'')+
     (rows.length?content:empty(t('暂无匹配记录','No matching records'),reason))+pagination(result.meta);
 }
 function testTile(test,showCase=true) {
@@ -123,7 +126,7 @@ async function caseDetail() {
     '</article><aside class="panel side"><div class="tagline">'+pill(item.category)+pill(item.rightsStatus,'ok')+'</div><h3>'+t('案例资料','Case record')+
     '</h3><div class="source-list"><div>'+t('作者','Author')+' '+link('/creators/'+item.authorId,item.author,'text-link')+'</div><div>'+
     t('参考模型','Model')+' '+link('/models/'+encodeURIComponent(item.model),item.model,'text-link')+'</div>'+
-    '<div>'+t('核验','Verified')+' '+date(item.verifiedAt)+'</div><div>'+t('热度','Popularity')+' '+known(item.heat)+'</div><div>'+
+    '<div>'+t('核验','Verified')+' '+date(item.verifiedAt)+'</div><div>'+t('热度','Popularity')+' '+known(item.heat)+(item.heatEvidence?' · '+external(item.heatEvidence.source,t('互动快照 ↗','Source snapshot ↗')):'')+'</div><div>'+
     t('稳定度','Stability')+' '+known(item.stability)+(item.stabilitySamples?' · '+item.stabilitySamples+' '+t('次评审','reviews'):'')+'</div>'+
     '<div>'+external(item.source,t('查看参考来源 ↗','Open reference ↗'))+'</div></div>'+
     '<div class="actions">'+button('/skills/'+item.id,t('查看 Skill','Open Skill'))+
@@ -308,38 +311,32 @@ async function graph() {
   });
 }
 
-const lessons={
-  coding:[
-    '从一个有现有测试的小问题开始。写清楚入口、当前行为和预期输出。',
-    '准备最小失败样本，再运行对应测试确认失败位置。给 Agent 提示词时附上测试命令与边界。',
-    '改动后重跑失败样本和已有回归。记录命令、退出码和验证覆盖范围。'
-  ],
-  retrieval:[
-    '给每个检索片段分配稳定 ID，保留原文和来源链接。准备一个能回答的问题和一个证据缺失的问题。',
-    '让模型返回 claims 与 unanswered。用本地代码检查每条 quote 是否能在指定段落逐字找到。',
-    '逐项核对数字、日期和版本。证据不足的断言回到检索或者写进 unanswered。'
-  ],
-  agents:[
-    '先为单个读操作定义参数、类型和成功返回。标清工具可以访问的对象。',
-    '区分参数错误、对象缺失与短时故障，为短时故障设置有限次数的重试。',
-    '用重复请求和超时各跑一遍，确认调用 ID 和结果可以追踪。'
-  ],
-  multimodal:[
-    '从一段你有权使用的素材提取对象和场景，只写可从图像或声音直接观察到的内容。',
-    '把画面描述映射成景别、秒数、机位运动与主体。独立标注创作建议。',
-    '导出镜头表，核对时长总和与素材顺序。保留一次修改前后的对照。'
-  ],
-  verification:[
-    '冻结输入文本、模型版本、温度等参数。设置你能承担的运行次数和开支上限。',
-    '存下实际输出与错误，人工核对预定条件，用证据链接关联每次复测。',
-    '报告样本量、失败次数和成本口径。仅有评分时展示参考分，人工判断另记。'
-  ]
-};
+function markdownBlocks(value) {
+  const lines=(value??'').trim().split('\n');
+  const sections=[];
+  let inCode=false, buffer=[];
+  for(const line of lines) {
+    if(line.startsWith('```')) {
+      if(inCode) {
+        sections.push('<div class="actions"><button class="button" data-copy="lesson-code">'+t('复制代码','Copy code')+
+          '</button></div><pre id="lesson-code">'+esc(buffer.join('\n'))+'</pre>');
+        buffer=[];
+      }
+      inCode=!inCode;
+      continue;
+    }
+    if(inCode) {buffer.push(line);continue;}
+    if(line.startsWith('## ')) sections.push('<h3>'+esc(line.slice(3))+'</h3>');
+    else if(line.trim()) sections.push('<p>'+esc(line)+'</p>');
+  }
+  return sections.join('');
+}
+const checklistFor=markdown=>[...(markdown??'').matchAll(/^\d+\. (.+)$/gm)].map(match=>match[1]);
+
 async function learn() {
-  const {data:tracks}=await get('learn/tracks');
+  const {data:tracks}=await get('learn/tracks',parts[1]?{}:{q:params.get('q')||''});
   if (!parts[1]) {
-    const query=params.get('q')?.toLowerCase();
-    const found=tracks.filter(track=>!query||[track.title,track.summary,track.articleTitle,track.tag,...lessons[track.id]].join(' ').toLowerCase().includes(query));
+    const found=tracks;
     root.innerHTML=heading('FIELD NOTES',t('实践课程','Practical lessons'),t('从一个实际任务开始，把方法练成可复用的流程。','Build a reusable workflow around one concrete task.'))+
       form(searchbox(t('搜索教程','Search lessons'),t('Codex、MCP、RAG…','Codex, MCP, RAG…')))+
       (found.length?'<div class="grid course">'+found.map((track,i)=>'<a class="tile '+['mint','violet','blue','peach','ocean'][i%5]+'" href="'+url('/learn/tracks/'+track.id)+'">'+
@@ -356,12 +353,12 @@ async function learn() {
       button('/cases/'+track.caseId,t('配套案例','Companion case'))+'</div></section>';
     return;
   }
-  const {data:item}=await get('cases/'+track.caseId);
+  const [{data:item},{data:lesson}]=await Promise.all([get('cases/'+track.caseId),get('learn/articles/'+track.articleId)]);
   const saved=new Set(storeGet('lesson-'+track.id,[]));
-  const steps=lessons[track.id];
+  const steps=checklistFor(lesson.markdown);
   root.innerHTML=heading(track.tag,track.articleTitle,track.summary,['/learn/tracks/'+track.id,t('← 学习路径','← Learning track')])+
     '<div class="layout-side"><article class="panel content"><section id="goal"><h2>'+t('任务','Task')+'</h2><p>'+esc(track.summary)+'</p></section>'+
-    '<section id="steps"><h2>'+t('练习步骤','Practice steps')+'</h2><ol>'+steps.map(step=>'<li>'+esc(step)+'</li>').join('')+'</ol></section>'+
+    '<section id="steps"><h2>'+t('练习步骤','Practice steps')+'</h2>'+markdownBlocks(lesson.markdown)+'</section>'+
     '<section id="example"><h2>'+t('复用示例','Reusable example')+'</h2><button class="button" data-copy="lesson-prompt">'+t('复制 Prompt','Copy prompt')+
     '</button><pre id="lesson-prompt">'+esc(en?item.enPrompt:item.prompt)+'</pre></section>'+
     '<section class="checklist" id="verify"><h2>'+t('验收清单','Checklist')+'</h2>'+steps.map((step,i)=>
@@ -414,8 +411,8 @@ async function connect() {
 }
 async function search() {
   const q=params.get('q')||'';
-  const [cases,news,tracks]=q?await Promise.all([dataOf(get('cases',{q,limit:9}),[]),dataOf(get('news',{q,mode:'all',limit:9}),[]),dataOf(get('learn/tracks'),[])]):[[],[],[]];
-  const learnResults=tracks.filter(x=>[x.title,x.tag,x.summary,x.articleTitle,...lessons[x.id]].join(' ').toLowerCase().includes(q.toLowerCase()));
+  const [cases,news,tracks]=q?await Promise.all([dataOf(get('cases',{q,limit:9}),[]),dataOf(get('news',{q,mode:'all',limit:9}),[]),dataOf(get('learn/tracks',{q}),[])]):[[],[],[]];
+  const learnResults=tracks;
   root.innerHTML=heading('SEARCH',t('全站搜索','Search the atlas'))+
     form(searchbox(t('关键词','Keyword'),t('搜索案例、资讯和课程','Search cases, news and lessons')),path,t('搜索','Search'))+
     (q?'<section class="section">'+section(t('案例','Cases'))+(cases.length?'<div class="grid">'+cases.map(caseCard).join('')+'</div>':empty(t('暂无结果','No results')))+
