@@ -1,5 +1,5 @@
 import {cases, tracks, entities, relations, offers, sources, editorialAt} from './content.mjs';
-import {all, one, run, updater, newsRows, cluster, computeGraph, httpsUrl, approvedHosts, titleKey, ensureSources} from './ingest.mjs';
+import {all, one, run, updater, newsRows, cluster, computeGraph, httpsUrl, approvedHosts, titleKey, ensureSources, privateSubscription} from './ingest.mjs';
 import {rankCases} from './ranking.mjs';
 import {shell, assets, lessons} from './generated.mjs';
 
@@ -233,7 +233,7 @@ async function writeAPI(request,env,url,user) {
     return output({id,status:'待溯源'},201,'no-store');
   }
   if (path==='/api/admin/refresh') {
-    const result=await updater(db,{force:true,kind:['all','news','offers'].includes(body.kind)?body.kind:'all'});
+    const result=await updater(db,{force:true,kind:['all','news','offers'].includes(body.kind)?body.kind:'all',privateFeed:env.ATLAS_PRIVATE_FEED_URL});
     return output(result,200,'no-store');
   }
   if (path==='/api/admin/sources') {
@@ -304,23 +304,24 @@ async function writeAPI(request,env,url,user) {
   return error('接口不存在',404);
 }
 
-async function adminRead(db) {
+async function adminRead({DB:db,ATLAS_PRIVATE_FEED_URL:privateFeed}) {
   if (!db) return error('数据库暂不可用',503);
   await ensureSources(db);
-  const [submissions,audits,health,tests]=await Promise.all([
+  const [submissions,audits,health,tests,subscription]=await Promise.all([
     all(db,'SELECT id,kind,title,url,detail,category,status,created_at FROM submissions ORDER BY created_at DESC LIMIT 70'),
     all(db,'SELECT action,target,created_at FROM audit ORDER BY created_at DESC LIMIT 30'),
     all(db,'SELECT id,label,url,category,checked_at,success_at,attempts,failures,error,enabled FROM sources ORDER BY label'),
-    all(db,'SELECT * FROM retests ORDER BY tested_at DESC LIMIT 30')
+    all(db,'SELECT * FROM retests ORDER BY tested_at DESC LIMIT 30'),
+    privateSubscription(db,privateFeed)
   ]);
-  return output({submissions,audits,health,tests,approvedHosts:[...approvedHosts]},200,'no-store');
+  return output({submissions,audits,health,tests,subscription,approvedHosts:[...approvedHosts]},200,'private, no-store');
 }
 
-async function startUpdate(db,ctx) {
+async function startUpdate({DB:db,ATLAS_PRIVATE_FEED_URL:privateFeed}) {
   const now=Date.now();
   const next=await run(db,`INSERT INTO settings VALUES('background_after',?)
       ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(settings.value AS INTEGER) < ?`,String(now+hours(.5)),now);
-  if (next.meta.changes) await updater(db);
+  if (next.meta.changes) await updater(db,{privateFeed});
 }
 
 const publicPaths=/^\/(?:cases(?:\/[^/]+)?|rankings|retests|skills(?:\/[^/]+)?|creators\/[^/]+|models\/[^/]+|daily|radar|map(?:\/3d)?|learn(?:\/(?:tracks|articles)\/[^/]+)?|token-ocean|token-club(?:\/[^/]+)?|connect|admin|submit|search)?$/;
@@ -346,13 +347,14 @@ export default {
         if (request.method==='POST') return await writeAPI(request,env,url,user);
         if (request.method!=='GET'&&request.method!=='HEAD') return error('方法不支持',405);
         if (path==='/api/v1/session') return output({signedIn:!!user.id,admin:user.admin},200,'private, no-store');
-        if (path.startsWith('/api/admin')) return user.admin?await adminRead(env.DB):error(user.id?'仅限管理员':'请先登录',user.id?403:401);
-        if (env.DB && ['/api/v1/news','/api/v1/token-offers','/api/v1/map/graph','/api/v1/map/terrain'].includes(path)) {
-          ctx.waitUntil(startUpdate(env.DB,ctx).catch(e=>console.error('Update failed',e.message)));
+        if (path.startsWith('/api/admin')) return user.admin?await adminRead(env):error(user.id?'仅限管理员':'请先登录',user.id?403:401);
+        if (env.DB && ['/api/v1/news','/api/v1/feed.xml','/api/v1/token-offers','/api/v1/map/graph','/api/v1/map/terrain'].includes(path)) {
+          ctx.waitUntil(startUpdate(env).catch(e=>console.error('Update failed',e.message)));
         }
         if (path==='/api/v1/feed.xml') {
           const data=env.DB?cluster(await newsRows(env.DB,new Date(Date.now()-hours(24*14)).toISOString())).slice(0,30):[];
-          return plain('<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>模型图鉴资讯雷达</title><link>'+esc(url.origin)+'</link><description>公开 AI 新闻来源索引</description>'+
+          return plain('<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>模型图鉴资讯雷达</title><link>'+esc(url.origin+'/radar')+'</link><description>AI 模型、开发工具与研究资讯</description><ttl>30</ttl>'+
+            '<atom:link href="'+esc(url.origin+'/api/v1/feed.xml')+'" rel="self" type="application/rss+xml"/>'+
             data.map(x=>'<item><title>'+esc(x.title)+'</title><link>'+esc(x.sources[0].url)+'</link><guid>'+esc(x.sources[0].url)+'</guid><pubDate>'+new Date(x.publishedAt).toUTCString()+'</pubDate></item>').join('')+
             '</channel></rss>','application/rss+xml; charset=utf-8');
         }

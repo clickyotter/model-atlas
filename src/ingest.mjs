@@ -5,6 +5,8 @@ export const one = (db, sql, ...values) => db.prepare(sql).bind(...values).first
 export const run = (db, sql, ...values) => db.prepare(sql).bind(...values).run();
 const hours = (count) => count * 3_600_000;
 const stamp = () => new Date().toISOString();
+const privateFeedKey = 'editorial_subscription';
+const privateFeedHosts = new Set(['aihot.news']);
 
 export function httpsUrl(value) {
   try {
@@ -78,11 +80,11 @@ export const approvedHosts = new Set([
   'www.openai.com','www.huggingface.co','www.github.blog','www.deepmind.google','blogs.microsoft.com','azure.microsoft.com'
 ]);
 
-async function originFetch(url, headers = {}) {
+async function originFetch(url, headers = {}, hosts = approvedHosts) {
   const signal = AbortSignal.timeout(7000);
   let target=httpsUrl(url);
   for (let hop=0;hop<4;hop++) {
-    if (!target || !approvedHosts.has(target.hostname) || target.port) throw new Error('信源域名不在允许范围');
+    if (!target || !hosts.has(target.hostname) || target.port) throw new Error('信源域名不在允许范围');
     const response=await fetch(target,{headers,redirect:'manual',signal});
     if (![301,302,303,307,308].includes(response.status)) return response;
     const next=response.headers.get('location');
@@ -124,6 +126,68 @@ async function ingestSource(db, source) {
       db.prepare('INSERT OR REPLACE INTO source_snapshots VALUES(?,?,?,?)').bind(source.id,at,0,'failed')
     ]);
   }
+}
+
+function privateFeedUrl(value) {
+  const url = httpsUrl(value);
+  return url && privateFeedHosts.has(url.hostname) && !url.port ? url.href : null;
+}
+
+async function privateFeedState(db, url) {
+  const row = await one(db,'SELECT value FROM settings WHERE key=?',privateFeedKey);
+  const state = row && JSON.parse(row.value);
+  return state?.url === url ? state : {url};
+}
+
+function privateFeedItems(xml, url, at) {
+  if (!/<item\b/i.test(xml)) return [];
+  const host = new URL(url).hostname;
+  return parseFeed(xml,{id:'editorial',category:'行业'},at).filter(item=>new URL(item.url).hostname===host);
+}
+
+export async function privateSubscription(db, configuredUrl) {
+  const url = privateFeedUrl(configuredUrl);
+  if (!url) return null;
+  const {xml,checkedAt,successAt,error} = await privateFeedState(db,url);
+  const items = xml && Date.now()-Date.parse(successAt)<hours(24) ? privateFeedItems(xml,url,successAt) : [];
+  return {url,checkedAt,successAt,error,items:items.slice(0,12).map(({title,url,publishedAt})=>({title,url,publishedAt}))};
+}
+
+async function refreshPrivateSubscription(db, configuredUrl, now, at) {
+  const url = privateFeedUrl(configuredUrl);
+  if (!url) return;
+  const state = await privateFeedState(db,url);
+  if (now < (state.retryAt ?? 0)) return;
+  const next = {...state,checkedAt:at,retryAt:now+hours(.5)};
+  try {
+    const headers = {Accept:'application/rss+xml, application/xml, text/xml'};
+    if (state.xml && state.etag) headers['If-None-Match'] = state.etag;
+    if (state.xml && state.modified) headers['If-Modified-Since'] = state.modified;
+    const response = await originFetch(url,headers,privateFeedHosts);
+    if (response.status!==304 || !state.xml) {
+      if (!response.ok) {
+        const retryAfter = response.headers.get('retry-after');
+        const retryAt = /^\d+$/.test(retryAfter ?? '') ? now+Number(retryAfter)*1000 : Date.parse(retryAfter);
+        if (Number.isFinite(retryAt)) next.retryAt = Math.max(next.retryAt,retryAt);
+        await response.body?.cancel();
+        throw new Error('HTTP '+response.status);
+      }
+      const xml = await cappedText(response,500_000);
+      if (!/<rss\b/i.test(xml) || !/<\/rss>\s*$/i.test(xml)) throw new Error('响应不是完整的 RSS');
+      if (/<item\b/i.test(xml) && !privateFeedItems(xml,url,at).length) throw new Error('没有通过校验的条目');
+      next.xml = xml;
+      next.etag = response.headers.get('etag');
+      next.modified = response.headers.get('last-modified');
+    }
+    next.successAt = at;
+    next.error = null;
+  } catch (error) {
+    next.error = error instanceof Error ? error.message.slice(0,150) : '读取失败';
+    next.retryAt = Math.max(next.retryAt,now+hours(1));
+    if (now-Date.parse(next.successAt)>=hours(24)) delete next.xml;
+  }
+  const {xml,...metadata} = next;
+  await run(db,'INSERT OR REPLACE INTO settings VALUES(?,?)',privateFeedKey,JSON.stringify({...metadata,xml}));
 }
 
 async function sha(text) {
@@ -242,7 +306,7 @@ export function computeGraph(rows, asOf) {
   return {nodes,edges:[...edges.values()]};
 }
 
-export async function updater(db,{force=false,kind='all'}={}) {
+export async function updater(db,{force=false,kind='all',privateFeed}={}) {
   const now=Date.now(), asOf=stamp();
   const lease=await run(db,`INSERT INTO settings VALUES('refresh_lease',?)
     ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(settings.value AS INTEGER) < ?`,String(now+hours(.025)),now);
@@ -251,10 +315,11 @@ export async function updater(db,{force=false,kind='all'}={}) {
     if (kind !== 'offers') {
       await ensureSources(db);
       const config=await all(db,'SELECT * FROM sources WHERE enabled=1');
-      await Promise.all(config.filter(source=>{
+      const ready = config.filter(source=>{
         const backoff=Math.min(hours(12),hours(.5)*2**Math.min(source.consecutive_failures,6));
         return force || !source.checked_at || now-Date.parse(source.checked_at)>=backoff;
-      }).map(source=>ingestSource(db,source)));
+      });
+      await Promise.all([...ready.map(source=>ingestSource(db,source)),refreshPrivateSubscription(db,privateFeed,now,asOf)]);
       for (const window of ['24h','7d']) {
         const snapshot=await one(db,'SELECT as_of FROM graph_snapshots WHERE window=?',window);
         if (force || !snapshot || now-Date.parse(snapshot.as_of)>=hours(12)) {

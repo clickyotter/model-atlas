@@ -21,15 +21,14 @@ export function sqlite(location=':memory:') {
         return {
           async all(){return {results:db.prepare(sql).all(...params)};},
           async first(){return db.prepare(sql).get(...params)??null;},
-          async run(){return {meta:db.prepare(sql).run(...params)};}
+          run(){return {meta:db.prepare(sql).run(...params)};}
         };
       }};
     },
     async batch(queries) {
       db.exec('BEGIN IMMEDIATE');
       try {
-        const operations=queries.map(query=>query.run());
-        const result=await Promise.all(operations);
+        const result=queries.map(query=>query.run());
         db.exec('COMMIT');
         return result;
       } catch(error) {db.exec('ROLLBACK');throw error;}

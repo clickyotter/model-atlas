@@ -37,6 +37,7 @@ export async function renderAdmin(){
   const [data,cases]=await Promise.all([api('/api/admin/overview'),get('cases',{limit:60})]);
   const reviewLabels={'待溯源':'待版权核验','待版权核验':'待复测','待复测':'已发布'};
   const caseOptions=cases.data.map(item=>'<option value="'+esc(item.id)+'">'+esc(item.title)+'</option>').join('');
+  const subscription=data.subscription;
   root.innerHTML=page+'<div class="actions"><form data-refresh><input name="kind" type="hidden" value="all"><button class="button dark">立即采集与核验</button></form>'+
     '<form data-refresh><input name="kind" type="hidden" value="offers"><button class="button">核验福利来源</button></form>'+
     button('/radar?view=health','公开信源状态')+'</div>'+
@@ -56,6 +57,13 @@ export async function renderAdmin(){
     '<label class="span">运行参数<textarea name="parameters" maxlength="1500" required></textarea></label>'+
     '<label class="span">结果与失败说明<textarea name="note" maxlength="2000" required></textarea></label>'+
     '<button class="button dark span">保存复测证据</button></form></section></div>'+
+    (subscription?'<section class="section panel">'+section('编辑参考订阅')+
+      '<div class="actions">'+external(subscription.url,'打开原始 RSS ↗')+
+      '<form data-refresh><input name="kind" type="hidden" value="news"><button class="button">立即检查资讯</button></form></div>'+
+      '<p class="meta">最近检查 '+date(subscription.checkedAt,true)+' · 最近成功 '+date(subscription.successAt,true)+
+      (subscription.error?' · '+esc(subscription.error):'')+'</p>'+
+      (subscription.items.length?'<ul>'+subscription.items.map(item=>'<li>'+external(item.url,item.title)+
+        ' <span class="meta">'+date(item.publishedAt,true)+'</span></li>').join('')+'</ul>':empty('暂无可预览的订阅条目'))+'</section>':'')+
     '<section class="section panel">'+section('登记案例互动快照',null,'仅录入已取得许可且可核对的数据。同平台、同类至少有两个案例各达到两次有效快照，才会生成传播榜。')+
     '<form class="form form-wide" id="metrics-form"><label class="span">案例<select name="caseId">'+caseOptions+'</select></label>'+
     input('platform','来源平台','例如 GitHub')+input('evidence','互动证据链接','https://','url')+

@@ -61,6 +61,67 @@ test('parses RSS and Atom, preserves sources and computes observed heat',()=>{
   assert.equal(computeGraph(records,now).nodes.find(x=>x.id==='deepseek').heat,null);
 });
 
+test('refreshes the editorial subscription privately and publishes only direct-source RSS',async t=>{
+  const db=sqlite();
+  const url='https://aihot.news/feed.xml';
+  const checks=[];
+  const stateKey='editorial_subscription';
+  const xml=(title,link)=>'<rss><channel>'+(title?'<item><title>'+title+'</title><link>'+link+'</link><pubDate>'+
+    new Date(Date.now()-60_000).toUTCString()+'</pubDate></item>':'')+'</channel></rss>';
+  let upstream=new Response(xml('Private editorial title','https://aihot.news/items/private'),{headers:{etag:'"one"'}});
+  t.mock.method(globalThis,'fetch',async (target,options)=>{
+    if (target.href===url) {
+      checks.push(options.headers['If-None-Match']);
+      return upstream;
+    }
+    return new Response(xml('Direct AI model news','https://openai.com/index/direct-news'));
+  });
+  const updates=[];
+  const call=(path,init)=>worker.fetch(new Request('https://atlas.local'+path,init),
+    {...access,DB:db,ATLAS_PRIVATE_FEED_URL:url},{waitUntil:task=>updates.push(task)});
+  const overview=()=>call('/api/admin/overview',{headers:admin}).then(output);
+  const refresh=()=>call('/api/admin/refresh',{method:'POST',body:'{"kind":"news"}',
+    headers:{...admin,origin:'https://atlas.local','content-type':'application/json'}});
+  const unlock=async ()=>{
+    const row=await db.prepare('SELECT value FROM settings WHERE key=?').bind(stateKey).first();
+    await db.prepare('UPDATE settings SET value=? WHERE key=?').bind(JSON.stringify({...JSON.parse(row.value),retryAt:0}),stateKey).run();
+  };
+  const feed='/api/v1/feed.xml';
+  assert.equal((await call('/api/admin/overview')).status,401);
+  assert.equal((await call('/api/admin/overview',{headers:who})).status,403);
+  assert.match(await (await call('/radar')).text(),/rel="alternate" type="application\/rss\+xml"/);
+  await call(feed);
+  await Promise.all(updates);
+  assert.equal((await overview()).subscription.items[0].title,'Private editorial title');
+  const rss=await call(feed);
+  assert.match(rss.headers.get('content-type'),/^application\/rss\+xml/);
+  const body=await rss.text();
+  assert.match(body,/https:\/\/openai\.com\/index\/direct-news/);
+  assert.doesNotMatch(body,/aihot\.news|Private editorial title/);
+  for(const path of ['/api/v1/news?mode=all','/api/v1/map/graph','/api/v1/sources/health']) {
+    assert.doesNotMatch(await (await call(path)).text(),/aihot\.news|Private editorial title/);
+  }
+  await Promise.all(updates);
+  assert.equal((await refresh()).status,200);
+  assert.deepEqual(checks,[undefined]);
+  await unlock();
+  upstream=new Response(null,{status:304});
+  await refresh();
+  assert.deepEqual(checks,[undefined,'"one"']);
+  assert.equal((await overview()).subscription.items.length,1);
+  await unlock();
+  upstream=new Response(null,{status:429,headers:{'retry-after':'7200'}});
+  await refresh();
+  assert.equal((await overview()).subscription.error,'HTTP 429');
+  assert.equal((await overview()).subscription.items.length,1);
+  await refresh();
+  assert.equal(checks.length,3);
+  await unlock();
+  upstream=new Response(xml());
+  await refresh();
+  assert.deepEqual((await overview()).subscription.items,[]);
+});
+
 test('requires identity and same-origin writes, moderates cases and persists retests',async()=>{
   assert.equal((await request('/api/admin/overview')).status,401);
   assert.equal((await request('/api/admin/overview',{headers:who})).status,403);

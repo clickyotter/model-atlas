@@ -270,7 +270,7 @@ async function radar() {
       select('source',t('信源','Source'),[['',t('全部','All')],...health.data.map(s=>[s.id,s.label])])+
       '<input type="hidden" name="mode" value="'+esc(mode)+'">'+(view==='classic'?'<input type="hidden" name="view" value="classic">':''))+
     '<div class="section-head"><div class="actions">'+chips([[modeLink('curated'),t('精选','Curated'),mode==='curated'],[modeLink('all'),t('全量','All items'),mode==='all']])+'</div>'+
-    '<div>'+status(result.meta)+'</div></div>'+
+    '<div class="actions">'+status(result.meta)+button('/api/v1/feed.xml',t('订阅 RSS','Subscribe via RSS'),'quiet')+'</div></div>'+
     (story?'<p class="actions">'+button('/radar?mode=all',t('清除新闻定位','Clear story filter'))+'</p>':'')+
     (result.data.length?'<div class="'+(view==='classic'?'board':'')+'"><div class="list">'+grouped+'</div>'+
       (view==='classic'?'<aside class="panel"><h3>'+t('当前重点','Highlights')+'</h3><p class="muted">'+t('按标题相关度与来源数排序','Sorted by relevance and source count')+'</p>'+top.map(newsPreview).join('')+'</aside>':'')+'</div>':
@@ -451,8 +451,11 @@ async function connect() {
     ['graph','关系图谱','/api/v1/map/graph?window=7d'],['learn','学习路径','/api/v1/learn/tracks'],['offers','福利规则','/api/v1/token-offers']
   ];
   root.innerHTML=heading('CONNECT',t('API、RSS 与 Agent','API, RSS and agents'),t('公开内容采用 JSON 接口，响应附更新时间、状态和来源。','Public JSON responses include timestamps, status and sources.'))+
-    '<div class="actions">'+button('/api/v1/feed.xml','RSS','dark')+button('/llms.txt','llms.txt')+button('/skills',t('浏览 Skills','Browse Skills'))+
-    '</div><div class="section grid">'+endpoints.map(([key,label,to])=>'<div class="tile"><h3>'+esc(label)+'</h3><code id="api-'+key+'">'+esc(to)+
+    '<div class="actions">'+button('/api/v1/feed.xml',t('打开 RSS','Open RSS'),'dark')+button('/llms.txt','llms.txt')+button('/skills',t('浏览 Skills','Browse Skills'))+
+    '</div><section class="section panel">'+section(t('订阅资讯雷达','Subscribe to News Radar'))+
+    '<code id="rss-url">'+esc(new URL('/api/v1/feed.xml',location.origin).href)+'</code><div class="actions" style="margin-top:10px">'+
+    '<button class="button" data-copy="rss-url">'+t('复制订阅地址','Copy feed URL')+'</button></div></section>'+
+    '<div class="section grid">'+endpoints.map(([key,label,to])=>'<div class="tile"><h3>'+esc(label)+'</h3><code id="api-'+key+'">'+esc(to)+
     '</code><div class="actions" style="margin-top:10px">'+external(to,t('查看 ↗','Open ↗'))+'<button class="button" data-copy="api-'+key+'">'+t('复制','Copy')+'</button></div></div>').join('')+'</div>';
   bindCopy();
 }
