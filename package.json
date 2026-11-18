@@ -1,0 +1,15 @@
+{
+  "name": "model-atlas",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node scripts/local.mjs",
+    "check": "node --test scripts/verify.mjs",
+    "dev": "node scripts/build.mjs && node scripts/local.mjs"
+  }
+}
